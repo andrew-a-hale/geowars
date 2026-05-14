@@ -3,54 +3,14 @@ package main
 import (
 	"fmt"
 	"math"
-	"math/rand"
 
 	rl "github.com/gen2brain/raylib-go/raylib"
 )
 
-const FPS = 60
-
-var (
-	screenWidth    int32      = 800
-	screenHeight   int32      = 450
-	center         rl.Vector2 = rl.Vector2{X: float32(screenWidth / 2), Y: float32(screenHeight / 2)}
-	headerPanel    int32      = 50
-	statusPanel    int32      = 50
-	gameRegionXMin int32      = -20
-	gameRegionXMax int32      = screenWidth + 20
-	gameRegionYMin int32      = headerPanel - 20
-	gameRegionYMax int32      = screenHeight - statusPanel + 20
-	paused         bool       = false
-	noPlayer       bool       = true
-	youDied        bool       = false
-	youWin         bool       = false
-	waves          []int      = []int{100, 20, 30, 40, 50, 40, 30, 20, 10, 100}
-	wave           int        = 0
-
-	shootCooldown      float32 = 0.02
-	shootTimer         float32 = 0
-	enemyMoveCooldown  float32 = 1
-	enemyMoveTimer     float32 = 0
-	waveCooldown       float32 = 5
-	waveTimer          float32 = 0
-	invurnableTimer    float32 = 0
-	invurnableCooldown float32 = 2
-	flashing           bool    = false
+const (
+	FPS         = 60
+	MAX_OBJECTS = 100000
 )
-
-type Object struct {
-	Id           int
-	Type         ObjectKind
-	State        State
-	Health       int
-	Size         float32
-	Speed        int
-	Damage       int
-	Position     rl.Vector2
-	Orientation  float32
-	TurnSpeed    float32
-	NextPosition rl.Vector2
-}
 
 type ObjectKind int
 
@@ -64,17 +24,61 @@ const (
 	EnemyHexagon
 )
 
-type State int
+type ObjectState int
 
 const (
-	Still State = iota
+	None ObjectState = iota
+	Still
 	Moving
 	Invurnable
 )
 
-const MAX_OBJECTS = 100000
+type Object struct {
+	Id                 int
+	Type               ObjectKind
+	State              ObjectState
+	Health             int
+	Size               float32
+	Speed              int
+	Damage             int
+	Position           rl.Vector2
+	Orientation        float32
+	TurnSpeed          float32
+	NextPosition       rl.Vector2
+	ShootTimer         int
+	ShootCooldown      int
+	InvurnableTimer    int
+	InvurnableCooldown int
+	MoveTimer          int
+	MoveCooldown       int
+}
 
-var Objects = [MAX_OBJECTS](*Object){}
+var (
+	// UI
+	screenWidth    int32      = 800
+	screenHeight   int32      = 450
+	headerPanel    int32      = 50
+	statusPanel    int32      = 50
+	outerBorder    int32      = 20
+	gameRegionXMin int32      = -outerBorder
+	gameRegionXMax int32      = screenWidth + outerBorder
+	gameRegionYMin int32      = headerPanel - outerBorder
+	gameRegionYMax int32      = screenHeight - statusPanel + outerBorder
+	center         rl.Vector2 = rl.Vector2{
+		X: float32(screenWidth / 2),
+		Y: float32(screenHeight / 2),
+	}
+
+	// Game State
+	Objects      [MAX_OBJECTS]*Object = [MAX_OBJECTS](*Object){}
+	paused       bool                 = false
+	youDied      bool                 = false
+	youWin       bool                 = false
+	waves        []int                = []int{50, 20, 30, 40, 50, 40, 30, 20, 10, 100}
+	wave         int                  = 0
+	waveCooldown int                  = 5 * FPS
+	waveTimer    int                  = 0
+)
 
 func initObjects() {
 	for i := range MAX_OBJECTS {
@@ -83,12 +87,16 @@ func initObjects() {
 }
 
 func allocObj(obj *Object) int {
-	for i, o := range Objects[1:] {
+	for i, o := range Objects {
+		if i == 0 {
+			continue
+		}
+
 		if (*o).Type == Null {
-			if i+1 < len(Objects) {
-				obj.Id = i + 1
-				Objects[i+1] = obj
-				return i + 1
+			if i < len(Objects) {
+				obj.Id = i
+				Objects[i] = obj
+				return i
 			}
 		}
 	}
@@ -102,32 +110,25 @@ func free(obj *Object) {
 	}
 }
 
-func getRandomPosition() rl.Vector2 {
-	return rl.Vector2{
-		X: float32(rl.GetRandomValue(gameRegionXMin, gameRegionXMax)),
-		Y: float32(rl.GetRandomValue(gameRegionYMin, gameRegionYMax)),
-	}
-}
-
 func getRandomPositionEdge() rl.Vector2 {
 	randSide := Direction(rl.GetRandomValue(0, 3))
 	switch randSide {
-	case top:
+	case TOP:
 		return rl.Vector2{
 			X: float32(rl.GetRandomValue(gameRegionXMin, gameRegionXMax)),
 			Y: float32(gameRegionYMin),
 		}
-	case bottom:
+	case BOTTOM:
 		return rl.Vector2{
 			X: float32(rl.GetRandomValue(gameRegionXMin, gameRegionXMax)),
 			Y: float32(gameRegionYMax),
 		}
-	case left:
+	case LEFT:
 		return rl.Vector2{
 			X: float32(gameRegionXMin),
 			Y: float32(rl.GetRandomValue(gameRegionYMin, gameRegionYMax)),
 		}
-	case right:
+	case RIGHT:
 		return rl.Vector2{
 			X: float32(gameRegionXMax),
 			Y: float32(rl.GetRandomValue(gameRegionYMin, gameRegionYMax)),
@@ -137,11 +138,13 @@ func getRandomPositionEdge() rl.Vector2 {
 }
 
 func outOfBounds(obj *Object) bool {
-	if obj.Position.X < -20 || obj.Position.X > float32(screenWidth)+20 {
+	if obj.Position.X < -float32(outerBorder) ||
+		obj.Position.X > float32(screenWidth)+float32(outerBorder) {
 		return true
 	}
 
-	if obj.Position.Y < -20 || obj.Position.Y > float32(screenHeight)+20 {
+	if obj.Position.Y < -float32(outerBorder) ||
+		obj.Position.Y > float32(screenHeight)+float32(outerBorder) {
 		return true
 	}
 
@@ -163,21 +166,46 @@ func inViewableRegion(obj *Object) bool {
 type Direction int
 
 const (
-	left Direction = iota
-	right
-	top
-	bottom
+	LEFT Direction = iota
+	RIGHT
+	TOP
+	BOTTOM
 )
 
 func cleanup() {
 	for _, o := range Objects {
 		if outOfBounds(o) {
-			free(o)
 			if o.Type == Player {
-				noPlayer = true
+				o.Health -= 1
+				if o.Health < 0 {
+					youDied = true
+					return
+				}
+				o.Position = center
+				o.InvurnableTimer = 0
+				o.State = Invurnable
+			} else {
+				free(o)
 			}
 		}
 	}
+}
+
+func drawPlayer(player *Object) {
+	var color rl.Color
+	if (player.InvurnableTimer/6)%2 == 0 && player.State == Invurnable {
+		color = rl.ColorAlpha(rl.Green, 0.25)
+	} else {
+		color = rl.Green
+	}
+
+	v1 := translate(player.Position, player.Orientation, 20)
+	v2 := translate(player.Position, player.Orientation+120, 10)
+	v3 := translate(player.Position, player.Orientation+240, 10)
+	rl.DrawCircleV(v1, 2, color)
+	rl.DrawCircleV(v2, 2, color)
+	rl.DrawCircleV(v3, 2, color)
+	rl.DrawTriangle(v3, v2, v1, color)
 }
 
 func render() {
@@ -191,25 +219,14 @@ func render() {
 		switch obj.Type {
 		case Null:
 		case Player:
-			if invurnableTimer < invurnableCooldown && !flashing {
-				flashing = true
-			} else {
-				v1 := translate(obj.Position, obj.Orientation, 20)
-				v2 := translate(obj.Position, obj.Orientation+120, 10)
-				v3 := translate(obj.Position, obj.Orientation+240, 10)
-				rl.DrawCircleV(v1, 2, rl.Green)
-				rl.DrawCircleV(v2, 2, rl.Green)
-				rl.DrawCircleV(v3, 2, rl.Green)
-				rl.DrawTriangleLines(v1, v2, v3, rl.Green)
-				flashing = false
-			}
-
+			drawPlayer(obj)
 		case Bullet:
 			rl.DrawCircleV(obj.Position, obj.Size, rl.Black)
 		case EnemyBullet:
 			rl.DrawCircleV(obj.Position, obj.Size, rl.Red)
 		case EnemySquare, EnemyPentagon, EnemyHexagon:
 			rl.DrawPolyLines(obj.Position, int32(obj.Type), obj.Size, 0, rl.Orange)
+			rl.DrawText(fmt.Sprintf("%d", obj.Id), int32(obj.Position.X), int32(obj.Position.Y), 5, rl.Black)
 		}
 	}
 
@@ -277,12 +294,12 @@ func moveForward(obj *Object) {
 
 func rotate(player *Object, dir Direction) {
 	switch dir {
-	case left:
+	case LEFT:
 		player.Orientation -= player.TurnSpeed
 		if player.Orientation < 0 {
 			player.Orientation += 360
 		}
-	case right:
+	case RIGHT:
 		player.Orientation += player.TurnSpeed
 		if player.Orientation > 360 {
 			player.Orientation -= 360
@@ -309,67 +326,81 @@ func isEnemy(obj *Object) bool {
 	}
 }
 
+func getRandomViewablePosition() rl.Vector2 {
+	return rl.Vector2{
+		X: float32(rl.GetRandomValue(gameRegionXMin+outerBorder, gameRegionXMax-outerBorder)),
+		Y: float32(rl.GetRandomValue(gameRegionYMin+outerBorder, gameRegionYMax-outerBorder)),
+	}
+}
+
+func moveToPositionOnDelay(o *Object, pos rl.Vector2) {
+	if o.MoveTimer > o.MoveCooldown && o.State == Still {
+		o.NextPosition = pos
+		o.State = Moving
+		o.MoveTimer = 0
+	} else if o.MoveTimer > o.MoveCooldown && o.State == Moving {
+		o.State = Still
+		o.MoveTimer = 0
+	} else if o.State == Moving {
+		o.Position = rl.Vector2MoveTowards(o.Position, o.NextPosition, float32(o.Speed))
+	}
+}
+
 func ai() {
 	player := getPlayer()
 
 	for _, o := range Objects {
+		o.ShootTimer += 1
+		o.MoveTimer += 1
+
 		switch o.Type {
 		case EnemyBullet:
 			moveForward(o)
-		case EnemyHexagon:
-			if enemyMoveTimer > enemyMoveCooldown && o.State == Still {
-				o.NextPosition = player.Position
-				o.State = Moving
-			} else if enemyMoveTimer > enemyMoveCooldown && o.State == Moving {
-				o.State = Still
-			} else if o.State == Moving {
-				o.Position = rl.Vector2MoveTowards(o.Position, o.NextPosition, float32(o.Speed))
-			}
 		case EnemySquare:
 			o.Position = rl.Vector2MoveTowards(o.Position, player.Position, float32(o.Speed))
 		case EnemyPentagon:
-			o.Position = rl.Vector2MoveTowards(o.Position, player.Position, float32(o.Speed))
-			if rand.Float32() < 0.005 {
-				v := rl.Vector2Normalize(rl.Vector2Subtract(o.Position, player.Position))
+			moveToPositionOnDelay(o, getRandomViewablePosition())
+			if o.ShootTimer > o.ShootCooldown {
+				v := rl.Vector2Normalize(rl.Vector2Subtract(player.Position, o.Position))
 				b := Object{
 					Type:        EnemyBullet,
-					Health:      1,
-					Speed:       2,
+					Speed:       1,
 					Position:    o.Position,
-					Size:        5,
+					Size:        3,
 					State:       Moving,
-					Orientation: float32(math.Atan(float64(v.Y/v.X))) * rl.Rad2deg,
+					Orientation: float32(math.Atan2(float64(v.Y), float64(v.X))) * rl.Rad2deg,
 				}
 				allocObj(&b)
+				o.ShootTimer = 0
 			}
+		case EnemyHexagon:
+			moveToPositionOnDelay(o, player.Position)
 		}
-	}
-
-	if enemyMoveTimer > enemyMoveCooldown {
-		enemyMoveTimer = 0
 	}
 }
 
 func physics() {
-	dt := float32(1.0 / FPS)
-	shootTimer += dt
-	enemyMoveTimer += dt
-	invurnableTimer += dt
-
 	for _, o := range Objects {
 		switch o.Type {
 		case Player:
+			o.ShootTimer += 1
+			o.InvurnableTimer += 1
 			for _, e := range Objects {
-				if isEnemy(e) && rl.CheckCollisionCircles(o.Position, o.Size, e.Position, e.Size) && invurnableTimer > invurnableCooldown {
+				if isEnemy(e) && rl.CheckCollisionCircles(o.Position, o.Size, e.Position, e.Size) {
 					free(e)
-					if o.Health == 0 {
-						youDied = true
-						return
+					if o.InvurnableTimer > o.InvurnableCooldown && o.State == None {
+						o.Health -= 1
+						if o.Health < 0 {
+							youDied = true
+							return
+						}
+						o.Position = center
+						o.InvurnableTimer = 0
+						o.State = Invurnable
+					} else if o.InvurnableTimer > o.InvurnableCooldown && o.State == Invurnable {
+						o.State = None
 					}
-					o.Health -= 1
-					o.Position = getRandomPosition()
-					invurnableTimer = 0
-					break
+
 				}
 			}
 		case Bullet:
@@ -387,23 +418,34 @@ func physics() {
 
 func spawnWave() {
 	if waveTimer < waveCooldown {
-		waveTimer += float32(1.0 / FPS)
+		waveTimer += 1
 		return
 	}
 
 	for range waves[wave] {
-		sides := rl.GetRandomValue(4, 6)
-		speed := 1
-		if sides == 6 {
-			speed *= 2
-		}
+		kind := ObjectKind(rl.GetRandomValue(4, 6))
 		e := Object{
-			Type:     ObjectKind(sides),
-			Health:   1,
-			Speed:    speed,
+			Type:     kind,
 			Position: getRandomPositionEdge(),
 			Size:     20,
 		}
+
+		switch kind {
+		case EnemySquare:
+			e.Speed = 1
+			e.State = Moving
+		case EnemyPentagon:
+			e.Speed = 1
+			e.State = Still
+			e.ShootTimer = 0
+			e.ShootCooldown = 120 + int(rl.GetRandomValue(0, 120))
+			e.MoveCooldown = 120
+		case EnemyHexagon:
+			e.Speed = 2
+			e.State = Still
+			e.MoveCooldown = 60
+		}
+
 		allocObj(&e)
 	}
 
@@ -435,6 +477,22 @@ func onlyOnePlayer() bool {
 	return true
 }
 
+func createPlayer(location rl.Vector2) Object {
+	return Object{
+		Type:               Player,
+		Health:             3,
+		Speed:              10,
+		Damage:             1,
+		Position:           location,
+		Orientation:        270,
+		TurnSpeed:          5,
+		Size:               30,
+		ShootCooldown:      3,
+		ShootTimer:         0,
+		InvurnableCooldown: 120,
+	}
+}
+
 func main() {
 	rl.InitWindow(screenWidth, screenHeight, "GeoWars")
 	rl.SetExitKey(rl.KeyEscape)
@@ -442,18 +500,8 @@ func main() {
 	rl.SetTargetFPS(FPS)
 
 	initObjects()
-	player := Object{
-		Type:        Player,
-		Health:      3,
-		Speed:       10,
-		Damage:      1,
-		Position:    center,
-		Orientation: 270,
-		TurnSpeed:   5,
-		Size:        30,
-	}
+	player := createPlayer(center)
 	allocObj(&player)
-	noPlayer = false
 
 	for !rl.WindowShouldClose() {
 		if !onlyOnePlayer() {
@@ -470,34 +518,18 @@ func main() {
 		}
 
 		if !paused {
-			if rl.IsKeyPressed(rl.KeyR) && noPlayer {
-				player = Object{
-					Type:        Player,
-					Health:      3,
-					Speed:       10,
-					Damage:      1,
-					Position:    getRandomPosition(),
-					Orientation: 0,
-					TurnSpeed:   5,
-					Size:        30,
-				}
-				allocObj(&player)
-				noPlayer = false
-			}
-
 			if rl.IsKeyDown(rl.KeySpace) {
-				if shootTimer > shootCooldown && !noPlayer {
+				if player.ShootTimer > player.ShootCooldown {
 					b := Object{
 						Type:        Bullet,
-						Health:      1,
 						Speed:       5,
 						Position:    translate(player.Position, player.Orientation, 25),
 						Orientation: player.Orientation,
-						Size:        5,
+						Size:        2,
 						State:       Moving,
 					}
 					allocObj(&b)
-					shootTimer = 0
+					player.ShootTimer = 0
 				}
 			}
 
@@ -506,11 +538,11 @@ func main() {
 			}
 
 			if rl.IsKeyDown(rl.KeyA) {
-				rotate(&player, left)
+				rotate(&player, LEFT)
 			}
 
 			if rl.IsKeyDown(rl.KeyD) {
-				rotate(&player, right)
+				rotate(&player, RIGHT)
 			}
 
 			// updates
